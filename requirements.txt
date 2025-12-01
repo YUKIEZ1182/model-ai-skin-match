@@ -1,0 +1,5 @@
+pandas
+mlxtend
+flask
+scikit-learn
+matplotlib

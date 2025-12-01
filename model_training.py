@@ -34,10 +34,6 @@ def parse_literal_list(s):
         return [item.strip() for item in s.split(",") if item.strip()]
 
 def mine_association_rules(cleaned_csv="data/cosmetics_cleaned.csv", min_support=0.05, min_confidence=0.7):
-    """
-    Mine association rules from the cleaned CSV file using Apriori.
-    Returns a DataFrame of the generated rules with antecedents and consequents as lists.
-    """
     print("Loading cleaned data from", cleaned_csv)
     df = pd.read_csv(cleaned_csv)
     

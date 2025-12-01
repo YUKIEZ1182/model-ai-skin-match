@@ -33,8 +33,8 @@ def get_rules():
     except Exception as e:
         return jsonify({"error": "Association rules model not found. Please update the model."}), 400
     
-    # Filter rules with lift > 1 and confidence > 0.6
-    filtered_df = rules_df[(rules_df['lift'] > 1) & (rules_df['confidence'] > 0.6)]
+    # Filter rules with lift > 1 and confidence > 0.7
+    filtered_df = rules_df[(rules_df['lift'] > 1) & (rules_df['confidence'] > 0.7)]
     
     if ingredient_param:
         query_ingredients = [i.strip().lower() for i in ingredient_param.split(',') if i.strip()]

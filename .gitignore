@@ -1,0 +1,15 @@
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Virtual Environment
+venv/
+env/
+
+# IDE settings
+.vscode/
+.idea/
+
+# Optional: ถ้าไม่อยากอัปโหลดไฟล์โมเดลหรือข้อมูล (เพราะไฟล์ใหญ่อาจติด limit) ให้ uncomment บรรทัดล่าง
+# *.pkl
+# *.csv
