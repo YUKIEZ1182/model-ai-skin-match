@@ -146,6 +146,55 @@ def training():
         return jsonify(response)
     except Exception as e:
         return jsonify({"error": f"An error occurred during training: {str(e)}"}), 500
+    
+@app.route('/skin-type-recommend', methods=['GET'])
+def recommend_products():
+    """
+    GET /skin-type-recommend?skin_type=oily
+    Returns a list of recommended ingredients for the given skin type.
+    """
+    user_skin_type = request.args.get('skin_type', '').lower().strip()
+    
+    # Path ไปยังไฟล์ Profile (ต้องรัน train_full_pipeline.py ก่อนถึงจะมีไฟล์นี้)
+    profile_path = os.path.join("model_output", "cluster_profile.pkl")
+    
+    if not os.path.exists(profile_path):
+        return jsonify({"error": "Model profile not found. Please run train_full_pipeline.py first."}), 500
+        
+    try:
+        with open(profile_path, "rb") as f:
+            cluster_profile = pickle.load(f)
+    except Exception as e:
+        return jsonify({"error": f"Error loading model profile: {str(e)}"}), 500
+        
+    # 1. หา Cluster ที่เหมาะกับผิวนี้ที่สุด
+    target_ingredients = []
+    
+    # Logic 1: หาแบบตรงตัว (Exact Match)
+    for cid, data in cluster_profile.items():
+        if any(user_skin_type == st.lower() for st in data['dominant_skin_types']):
+            target_ingredients = data['key_ingredients']
+            break
+            
+    # Logic 2: ถ้าไม่เจอ ให้หาแบบบางส่วน (Contains Match)
+    if not target_ingredients:
+        for cid, data in cluster_profile.items():
+            for st in data['dominant_skin_types']:
+                if user_skin_type in st.lower() or st.lower() in user_skin_type:
+                    target_ingredients = data['key_ingredients']
+                    break
+        
+    if not target_ingredients:
+        return jsonify({"error": f"No recommendation found for skin type: {user_skin_type}"}), 404
+
+    # 2. Return แค่ List ส่วนผสม (Top 5-10 ตัว)
+    # Directus จะเอา List นี้ไปวนลูปสร้าง Query เอง
+    top_ingredients = target_ingredients[:10] 
+    
+    return jsonify({
+        "skin_type": user_skin_type,
+        "recommended_ingredients": top_ingredients
+    })
 
 if __name__ == '__main__':
     app.run(debug=True)
