@@ -187,9 +187,10 @@ def recommend_products():
     if not target_ingredients:
         return jsonify({"error": f"No recommendation found for skin type: {user_skin_type}"}), 404
 
-    # 2. Return แค่ List ส่วนผสม (Top 5-10 ตัว)
+    # 2. Return แค่ List ส่วนผสม (Top 5 ตัว)
     # Directus จะเอา List นี้ไปวนลูปสร้าง Query เอง
-    top_ingredients = target_ingredients[:10] 
+    # ✅ ปรับจาก 10 เหลือ 5 เพื่อลด Noise
+    top_ingredients = target_ingredients[:5] 
     
     return jsonify({
         "skin_type": user_skin_type,
@@ -197,4 +198,5 @@ def recommend_products():
     })
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    # ✅ ปรับ Host เป็น 0.0.0.0 เพื่อให้ทำงานบน Docker/Coolify ได้
+    app.run(host='0.0.0.0', port=5000)
