@@ -3,3 +3,4 @@ mlxtend
 flask
 scikit-learn
 matplotlib
+numpy
