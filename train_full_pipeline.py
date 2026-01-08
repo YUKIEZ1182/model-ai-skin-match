@@ -2,133 +2,124 @@ import pandas as pd
 import numpy as np
 import pickle
 import os
-import glob
+import ast
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
 from collections import Counter
 
-# Import ฟังก์ชันเดิมจากไฟล์ที่คุณมี
+# Import ฟังก์ชันจากไฟล์ที่มีอยู่เดิม
 from clean_cosmetic_ingredients import clean_ingredients
 from model_training import train_from_scratch
 
-# ตั้งค่าโฟลเดอร์
+# ตั้งค่าเส้นทางไฟล์
 DATA_DIR = "data"
 OUTPUT_DIR = "model_output"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-def load_and_combine_data(data_dir):
-    """อ่านไฟล์ CSV ทั้งหมดในโฟลเดอร์ data มารวมกัน"""
-    all_files = glob.glob(os.path.join(data_dir, "*.csv"))
-    
-    # กรองเอาเฉพาะไฟล์ที่เป็น Raw Data (ไม่เอาไฟล์ที่ clean แล้ว)
-    raw_files = [f for f in all_files if "cleaned" not in f and "report" not in f]
-    
-    print(f"📂 Found {len(raw_files)} data files: {[os.path.basename(f) for f in raw_files]}")
-    
-    df_list = []
-    for filename in raw_files:
-        try:
-            temp_df = pd.read_csv(filename)
-            # เพิ่มคอลัมน์ skin_type ถ้ายัังไม่มี (สำหรับไฟล์เก่า)
-            if 'skin_type' not in temp_df.columns:
-                temp_df['skin_type'] = np.nan
-            df_list.append(temp_df)
-        except Exception as e:
-            print(f"⚠️ Error reading {filename}: {e}")
-            
-    if not df_list:
-        raise ValueError("No CSV files found in data directory!")
+def find_optimal_k(X, max_k=10):
+    """
+    หลักการ: Silhouette Method
+    หาค่า K (จำนวนกลุ่ม) ที่ดีที่สุดโดยวัดความใกล้ชิดของข้อมูลภายในกลุ่ม 
+    และความห่างระหว่างกลุ่ม (ค่าที่เข้าใกล้ 1 คือดีที่สุด)
+    """
+    n_samples = X.shape[0]
+    if n_samples < 2:
+        return 1
         
-    combined_df = pd.concat(df_list, ignore_index=True)
-    print(f"✅ Combined Data: {len(combined_df)} total rows")
-    return combined_df
+    actual_max_k = min(max_k, n_samples - 1)
+    best_k = 2
+    best_score = -1
+    
+    print(f"🔍 Finding optimal K (range 2 to {actual_max_k})...")
+    
+    for k in range(2, actual_max_k + 1):
+        km = KMeans(n_clusters=k, n_init=10, random_state=42)
+        labels = km.fit_predict(X)
+        score = silhouette_score(X, labels)
+        
+        if score > best_score:
+            best_score = score
+            best_k = k
+            
+    print(f"✅ Optimal K found: {best_k} (Silhouette Score: {best_score:.4f})")
+    return best_k
 
-def process_skin_type_column(df):
-    """แปลงข้อมูล Skin Type ให้เป็น List และจัดการค่าว่าง"""
-    def clean_skin_type(x):
-        if pd.isna(x) or str(x).strip() == "":
-            return []
-        return [s.strip().lower() for s in str(x).split(',')]
-    
-    return df['skin_type'].apply(clean_skin_type)
+def run_pipeline():
+    # 1. Load Data
+    cleaned_csv = os.path.join(DATA_DIR, "cosmetics_cleaned_final.csv")
+    if not os.path.exists(cleaned_csv):
+        print(f"❌ Error: {cleaned_csv} not found.")
+        return
 
-def main():
-    # 1. Load & Combine Data
-    df = load_and_combine_data(DATA_DIR)
-    
-    # 2. Clean Ingredients
-    print("Cleaning ingredients...")
-    # แปลงเป็น string ก่อนกัน error
-    df['ingredients'] = df['ingredients'].astype(str)
-    df['clean_ingredients'] = df['ingredients'].apply(clean_ingredients)
-    
-    # ลบแถวที่ไม่มีส่วนผสม (หลังจาก clean)
-    df = df[df['clean_ingredients'] != ""]
-    
-    # ==========================================
-    # PART 1: Update Association Model
-    # ==========================================
-    print("\n--- Training Association Rules ---")
-    # ใช้ train_from_scratch สร้างโมเดลใหม่จากข้อมูลรวม
-    train_from_scratch(df, cleaned_csv=os.path.join(DATA_DIR, "cosmetics_cleaned_final.csv"))
-    print("Association Model Updated!")
+    df = pd.read_csv(cleaned_csv)
+    print(f"📂 Loaded {len(df)} products for training.")
 
-    # ==========================================
-    # PART 2: New K-Means with Skin Type Logic
-    # ==========================================
-    print("\n--- Training K-Means & Skin Type Mapping ---")
-    
-    # 2.1 Vectorize
-    vectorizer = TfidfVectorizer(tokenizer=lambda x: x.split(', '), token_pattern=None)
-    X = vectorizer.fit_transform(df['clean_ingredients'])
-    
-    # 2.2 Clustering
-    K = 5 # ปรับจำนวนกลุ่มได้ตามต้องการ
-    kmeans = KMeans(n_clusters=K, random_state=42)
-    clusters = kmeans.fit_predict(X)
-    df['cluster'] = clusters
-    
-    # 2.3 Analyze Skin Type per Cluster
-    df['skin_type_list'] = process_skin_type_column(df)
-    
+    # 2. Vectorization (TF-IDF)
+    # หลักการ: TF-IDF ช่วยลดความสำคัญของคำที่พบบ่อยเกินไป (เช่น Water) ด้วย max_df=0.8
+    # และตัดส่วนผสมที่พบน้อยเกินไป (Noise) ด้วย min_df=2
+    vectorizer = TfidfVectorizer(max_df=0.8, min_df=2) 
+    X = vectorizer.fit_transform(df['clean_ingredients'].fillna(''))
+
+    # 3. K-Means with Statistical Optimal K
+    k = find_optimal_k(X)
+    if k > 1:
+        kmeans = KMeans(n_clusters=k, n_init=10, random_state=42)
+        df['cluster'] = kmeans.fit_predict(X)
+    else:
+        df['cluster'] = 0
+        print("⚠️ Not enough data for clustering. Assigned all to cluster 0.")
+
+    # 4. Generate Cluster Profiles
     cluster_profile = {}
     feature_names = np.array(vectorizer.get_feature_names_out())
 
-    for i in range(K):
+    for i in range(k if k > 1 else 1):
         cluster_products = df[df['cluster'] == i]
         
-        # นับ Skin Type เฉพาะจากสินค้าที่มีข้อมูล (ไฟล์ใหม่)
-        all_skin_types = [st for sublist in cluster_products['skin_type_list'] for st in sublist]
+        # จัดการข้อมูล Skin Type (แปลงจาก String เป็น List)
+        all_skin_types = []
+        for st in cluster_products['skin_type'].dropna():
+            try:
+                # รองรับ format ['oily', 'dry'] หรือ oily, dry
+                st_str = str(st)
+                if '[' in st_str:
+                    all_skin_types.extend(ast.literal_eval(st_str))
+                else:
+                    all_skin_types.extend([s.strip() for s in st_str.split(',') if s.strip()])
+            except:
+                continue
         
-        if all_skin_types:
-            skin_counts = Counter(all_skin_types)
-            top_skin_types = [st for st, count in skin_counts.most_common(3)]
+        # เลือกสภาพผิวที่โดดเด่นที่สุดในกลุ่มนั้น 2 อันดับแรก
+        top_skin_types = [st for st, count in Counter(all_skin_types).most_common(2)]
+        
+        # หา Key Ingredients (ส่วนผสมหลักที่เป็นตัวแทนของกลุ่ม) จาก Centroid
+        if k > 1:
+            centroid = kmeans.cluster_centers_[i]
+            top_indices = centroid.argsort()[-10:][::-1]
+            key_ingredients = feature_names[top_indices].tolist()
         else:
-            top_skin_types = ["unknown"] # กรณีกลุ่มนี้มาจากไฟล์เก่าล้วนๆ
-            
-        # หา Key Ingredients (Centroid)
-        centroid = kmeans.cluster_centers_[i]
-        top_indices = centroid.argsort()[-10:][::-1]
-        key_ingredients = feature_names[top_indices].tolist()
+            key_ingredients = feature_names[X.toarray().mean(axis=0).argsort()[-10:][::-1]].tolist()
         
         cluster_profile[i] = {
-            "dominant_skin_types": top_skin_types,
+            "dominant_skin_types": top_skin_types if top_skin_types else ["all skin types"],
             "key_ingredients": key_ingredients,
             "product_count": len(cluster_products)
         }
-        
-        print(f"Cluster {i} ({len(cluster_products)} products):")
-        print(f"  - Suitable for: {top_skin_types}")
-        print(f"  - Key Ingredients: {key_ingredients[:3]}...")
 
-    # 2.4 Save Models
-    print(f"\nSaving K-Means models to {OUTPUT_DIR}...")
-    with open(os.path.join(OUTPUT_DIR, "cluster_profile.pkl"), "wb") as f:
+    # 5. Save Model Output
+    profile_path = os.path.join(OUTPUT_DIR, "cluster_profile.pkl")
+    with open(profile_path, "wb") as f:
         pickle.dump(cluster_profile, f)
-        
-    # (Optional: ถ้าจะ save vectorizer/kmeans model ด้วยก็เพิ่มตรงนี้)
-        
-    print("All Done! Ready to use.")
+    print(f"💾 Cluster profile saved to {profile_path}")
+
+    # 6. Train Association Rules ต่อ
+    # เรียกใช้ฟังก์ชันเดิมเพื่อหาความสัมพันธ์ของส่วนผสม (Association Rules)
+    # โดยใช้ข้อมูลล่าสุดที่มีการจัดการ Entity Resolution เรียบร้อยแล้ว
+    print("🔄 Training association rules...")
+    train_from_scratch(df, cleaned_csv=cleaned_csv)
+    
+    print("🚀 Full pipeline completed successfully!")
 
 if __name__ == "__main__":
-    main()
+    run_pipeline()
