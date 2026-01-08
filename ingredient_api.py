@@ -5,42 +5,42 @@ import pickle
 import os
 from datetime import datetime
 
-from model_training import update_model  # Import update_model from model_training.py
+from train_full_pipeline import run_pipeline
+from clean_cosmetic_ingredients import clean_ingredients
+from model_training import update_model 
 
 app = Flask(__name__)
 
+# --- ฟังก์ชันช่วย (Helper Functions) ---
+
 def load_rules_model(model_file=os.path.join("model", "association_model.pkl")):
-    """
-    Load the association rules from the pickled model file.
-    """
+    """โหลดโมเดล Association Rules จากไฟล์ Pickle"""
     if os.path.exists(model_file):
         with open(model_file, "rb") as f:
             rules_df = pickle.load(f)
         return rules_df.sort_values(by=["lift", "confidence", "support"], ascending=False)
     else:
-        raise FileNotFoundError("Association model file not found. Please update the model.")
+        raise FileNotFoundError("Association model file not found. Please run training first.")
+
+# --- API Endpoints ---
 
 @app.route('/rules', methods=['GET'])
 def get_rules():
-    """
-    GET /rules returns association rules.
-    Supports filtering by ingredients (comma-separated query parameter).
-    """
+    """ดึงข้อมูลความสัมพันธ์ของส่วนผสม (Association Rules) พร้อมการกรอง"""
     ingredient_param = request.args.get('ingredient', None)
     
     try:
         rules_df = load_rules_model()
     except Exception as e:
-        return jsonify({"error": "Association rules model not found. Please update the model."}), 400
+        return jsonify({"error": str(e)}), 400
     
-    # Filter rules with lift > 1 and confidence > 0.7
+    # กรองเฉพาะกฎที่มีนัยสำคัญ (Lift > 1 และ Confidence > 0.7)
     filtered_df = rules_df[(rules_df['lift'] > 1) & (rules_df['confidence'] > 0.7)]
     
     if ingredient_param:
         query_ingredients = [i.strip().lower() for i in ingredient_param.split(',') if i.strip()]
         
         def rule_matches(row):
-            # Combine the antecedents and consequents lists
             union_ing = [ing.lower() for ing in (row['antecedents'] + row['consequents'])]
             return any(q in union_ing for q in query_ingredients)
         
@@ -51,8 +51,7 @@ def get_rules():
             return all(q in union_ing for q in query_ingredients)
         
         filtered_df = filtered_df.copy()
-        match_all_series = filtered_df.apply(lambda row: int(contains_all(row)), axis=1)
-        filtered_df['match_all'] = match_all_series.values.flatten()
+        filtered_df['match_all'] = filtered_df.apply(lambda row: int(contains_all(row)), axis=1)
         filtered_df = filtered_df.sort_values(by=["match_all", "lift", "confidence", "support"], ascending=False)
     else:
         filtered_df = filtered_df.sort_values(by=["lift", "confidence", "support"], ascending=False)
@@ -60,8 +59,8 @@ def get_rules():
     result = []
     for _, row in filtered_df.iterrows():
         result.append({
-            "antecedents": row['antecedents'],  # Already stored as list
-            "consequents": row['consequents'],  # Already stored as list
+            "antecedents": row['antecedents'],
+            "consequents": row['consequents'],
             "support": row['support'],
             "confidence": row['confidence'],
             "lift": row['lift']
@@ -69,97 +68,14 @@ def get_rules():
     
     return jsonify(result)
 
-@app.route('/upload_data', methods=['POST'])
-def upload_data():
-    """
-    POST /upload_data allows uploading a new CSV file (via form-data key "file")
-    to update the model. The updated model is saved to csv_report/ and model/ directories.
-    """
-    if 'file' not in request.files:
-        return jsonify({"error": "No file part in the request."}), 400
-
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({"error": "No file selected for uploading."}), 400
-
-    try:
-        new_data = pd.read_csv(io.StringIO(file.stream.read().decode("utf-8")))
-        combined_data, rules = update_model(new_data)
-        response = {
-            "message": "Data uploaded and model updated successfully.",
-            "num_transactions": len(combined_data),
-            "num_rules": len(rules)
-        }
-        return jsonify(response)
-    except Exception as e:
-        return jsonify({"error": f"An error occurred during upload: {str(e)}"}), 500
-
-@app.route('/training', methods=['POST'])
-def training():
-    """
-    POST /training?ingredient=<comma-separated ingredients>&product_name=<product name>
-    Adds a new transaction to the cleaned data and updates the model.
-    If the product name already exists in the cleaned data (data/cosmetics_cleaned.csv),
-    no new training is performed and a notification is returned.
-    Otherwise, the model is updated and timestamped CSV and pickle files are saved.
-    """
-    ingredient_param = request.args.get('ingredient', None)
-    product_name = request.args.get('product_name', None)
-    
-    if not ingredient_param:
-        return jsonify({"error": "No ingredient provided in query parameters."}), 400
-    if not product_name:
-        return jsonify({"error": "No product_name provided in query parameters."}), 400
-
-    new_data = pd.DataFrame({
-        "product_name": [product_name.lower()],
-        "clean_ingredients": [ingredient_param.lower()]
-    })
-    
-    cleaned_csv = os.path.join("data", "cosmetics_cleaned.csv")
-    
-    if os.path.exists(cleaned_csv):
-        df_existing = pd.read_csv(cleaned_csv)
-        if "product_name" in df_existing.columns:
-            if product_name.lower() in df_existing["product_name"].str.lower().values:
-                return jsonify({"message": f"Product '{product_name}' already exists. No update was performed."}), 200
-
-    try:
-        combined_data, rules = update_model(new_data, cleaned_csv=cleaned_csv)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        rule_filename = f"association_rules_{timestamp}.csv"
-        model_filename = f"association_model_{timestamp}.pkl"
-        csv_path = os.path.join("csv_report", rule_filename)
-        model_path = os.path.join("model", model_filename)
-        
-        rules.to_csv(csv_path, index=False)
-        with open(model_path, "wb") as f:
-            pickle.dump(rules, f)
-        
-        response = {
-            "message": "Model updated successfully.",
-            "num_transactions": len(combined_data),
-            "num_rules": len(rules),
-            "rules_file": csv_path,
-            "model_file": model_path
-        }
-        return jsonify(response)
-    except Exception as e:
-        return jsonify({"error": f"An error occurred during training: {str(e)}"}), 500
-    
 @app.route('/skin-type-recommend', methods=['GET'])
 def recommend_products():
-    """
-    GET /skin-type-recommend?skin_type=oily
-    Returns a list of recommended ingredients for the given skin type.
-    """
+    """แนะนำส่วนผสมที่เหมาะสมตามสภาพผิว โดยใช้ผลลัพธ์จาก K-Means Clustering"""
     user_skin_type = request.args.get('skin_type', '').lower().strip()
-    
-    # Path ไปยังไฟล์ Profile (ต้องรัน train_full_pipeline.py ก่อนถึงจะมีไฟล์นี้)
     profile_path = os.path.join("model_output", "cluster_profile.pkl")
     
     if not os.path.exists(profile_path):
-        return jsonify({"error": "Model profile not found. Please run train_full_pipeline.py first."}), 500
+        return jsonify({"error": "Model profile not found. Please run retrain first."}), 500
         
     try:
         with open(profile_path, "rb") as f:
@@ -167,7 +83,6 @@ def recommend_products():
     except Exception as e:
         return jsonify({"error": f"Error loading model profile: {str(e)}"}), 500
         
-    # 1. หา Cluster ที่เหมาะกับผิวนี้ที่สุด
     target_ingredients = []
     
     # Logic 1: หาแบบตรงตัว (Exact Match)
@@ -176,7 +91,7 @@ def recommend_products():
             target_ingredients = data['key_ingredients']
             break
             
-    # Logic 2: ถ้าไม่เจอ ให้หาแบบบางส่วน (Contains Match)
+    # Logic 2: หาแบบบางส่วน (Contains Match)
     if not target_ingredients:
         for cid, data in cluster_profile.items():
             for st in data['dominant_skin_types']:
@@ -187,16 +102,103 @@ def recommend_products():
     if not target_ingredients:
         return jsonify({"error": f"No recommendation found for skin type: {user_skin_type}"}), 404
 
-    # 2. Return แค่ List ส่วนผสม (Top 5 ตัว)
-    # Directus จะเอา List นี้ไปวนลูปสร้าง Query เอง
-    # ✅ ปรับจาก 10 เหลือ 5 เพื่อลด Noise
-    top_ingredients = target_ingredients[:5] 
-    
+    # ส่งคืน Top 5 ส่วนผสมเพื่อลด Noise
     return jsonify({
         "skin_type": user_skin_type,
-        "recommended_ingredients": top_ingredients
+        "recommended_ingredients": target_ingredients[:5] 
     })
 
+@app.route('/retrain', methods=['POST'])
+def retrain():
+    """
+    Endpoint สำหรับรับข้อมูลชุดใหญ่จาก Directus เพื่อ Update ข้อมูลใน CSV และสั่ง Retrain
+    ใช้หลักการ:
+    1. Entity Integrity: ตรวจสอบ ID เป็นหลัก ถ้าเจอให้ Update
+    2. Entity Resolution: ถ้า ID ไม่เจอแต่ชื่อซ้ำ ให้ถือเป็นสินค้าเดิมและ Update ID
+    3. Duplicate Handling: สินค้าต่างแบรนด์ที่ส่วนผสมเหมือนกันจะถูกเก็บแยกแถว (เพราะ ID ต่างกัน)
+    """
+    new_items = request.json
+    if not new_items or not isinstance(new_items, list):
+        return jsonify({"error": "Invalid data format. Expected a list."}), 400
+
+    cleaned_csv = os.path.join("data", "cosmetics_cleaned_final.csv")
+    
+    try:
+        df = pd.read_csv(cleaned_csv)
+    except FileNotFoundError:
+        # กรณีรันครั้งแรกแล้วไม่มีไฟล์เดิม
+        df = pd.DataFrame(columns=['directus_id', 'product_name', 'ingredients', 'clean_ingredients', 'skin_type'])
+
+    # ตรวจสอบว่ามีคอลัมน์ directus_id หรือยัง
+    if 'directus_id' not in df.columns:
+        df['directus_id'] = None
+
+    updated_count = 0
+    new_count = 0
+
+    for item in new_items:
+        d_id = item.get('id')
+        name = item.get('name', '').strip()
+        ing_raw = item.get('ingredients', '').strip()
+        skin_types = item.get('skin_types', [])
+        
+        clean_ing = clean_ingredients(ing_raw)
+        
+        # 1. ตรวจสอบจาก ID (Entity Integrity)
+        mask_id = df['directus_id'] == d_id
+        if mask_id.any():
+            # เจอ ID เดิม -> อัปเดตข้อมูลทับ (รองรับเปลี่ยนชื่อแบรนด์หรือเปลี่ยนสูตร)
+            df.loc[mask_id, ['product_name', 'ingredients', 'clean_ingredients', 'skin_type']] = \
+                [name, ing_raw, clean_ing, str(skin_types)]
+            updated_count += 1
+        else:
+            # 2. ไม่เจอ ID แต่ "ชื่อสินค้า" ซ้ำ (Entity Resolution)
+            mask_name = df['product_name'].str.lower() == name.lower()
+            if mask_name.any():
+                # อัปเดต ID และข้อมูลอื่นๆ ลงในสินค้าชื่อเดิมที่มีอยู่
+                df.loc[mask_name, ['directus_id', 'ingredients', 'clean_ingredients', 'skin_type']] = \
+                    [d_id, ing_raw, clean_ing, str(skin_types)]
+                updated_count += 1
+            else:
+                # 3. สินค้าใหม่ (ไม่ซ้ำทั้ง ID และ ชื่อ) -> เพิ่มเป็นแถวใหม่
+                new_row = {
+                    "directus_id": d_id,
+                    "product_name": name,
+                    "ingredients": ing_raw,
+                    "clean_ingredients": clean_ing,
+                    "skin_type": str(skin_types)
+                }
+                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+                new_count += 1
+
+    # บันทึกข้อมูลลง CSV
+    df.to_csv(cleaned_csv, index=False)
+    
+    try:
+        # สั่งรัน Pipeline เพื่อหาค่า K ที่ดีที่สุด และสร้างโมเดลใหม่ทันที
+        run_pipeline()
+        return jsonify({
+            "status": "success",
+            "message": "Model retrained successfully.",
+            "updated": updated_count,
+            "new_added": new_count
+        }), 200
+    except Exception as e:
+        return jsonify({"error": f"Retrain logic failed: {str(e)}"}), 500
+
+# Endpoint เดิมสำหรับการอัปโหลดไฟล์ผ่าน Form-data
+@app.route('/upload_data', methods=['POST'])
+def upload_data():
+    if 'file' not in request.files:
+        return jsonify({"error": "No file part"}), 400
+    file = request.files['file']
+    try:
+        new_data = pd.read_csv(io.StringIO(file.stream.read().decode("utf-8")))
+        combined_data, rules = update_model(new_data)
+        return jsonify({"message": "Data processed", "num_rules": len(rules)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == '__main__':
-    # ✅ ปรับ Host เป็น 0.0.0.0 เพื่อให้ทำงานบน Docker/Coolify ได้
+    # รันบน Host 0.0.0.0 เพื่อให้เข้าถึงได้จากภายนอก (เช่น Docker/Coolify)
     app.run(host='0.0.0.0', port=5000)
