@@ -1,7 +1,8 @@
 [project]
 name = "model-ai-skin-match"
-version = "1.0.0"
+version = "1.0.1"
 description = "AI Service for Cosmetic Ingredient Association and Skin Type Clustering"
+
 dependencies = [
     "pandas",
     "mlxtend",
@@ -14,5 +15,10 @@ dependencies = [
     "gunicorn"
 ]
 
-[tool.setuptools]
-packages = ["."]
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["*.py"]

@@ -5,11 +5,8 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-COPY pyproject.toml .
-
-RUN pip install --no-cache-dir . gunicorn
-
 COPY . .
+RUN pip install --no-cache-dir .
 
 RUN mkdir -p data model
 EXPOSE 5000
