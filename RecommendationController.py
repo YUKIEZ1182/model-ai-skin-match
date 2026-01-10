@@ -19,6 +19,9 @@ CLUSTER_ID = os.getenv("CLUSTERING_MODEL_ID")
 ASSOC_ID = os.getenv("ASSOCIATION_MODEL_ID")
 headers = {"Authorization": f"Bearer {TOKEN}"}
 
+AI_MIN_LIFT = float(os.getenv("AI_MIN_LIFT", "1.0"))
+AI_MIN_CONFIDENCE = float(os.getenv("AI_MIN_CONFIDENCE", "0.5"))
+
 # Global memory storage for models
 cluster_mem, rules_mem = None, None
 
@@ -44,16 +47,16 @@ load_resources()
 
 @app.route('/rules', methods=['GET'])
 def getRecommendWithSimilarIngredient():
-    """
-    Method as defined in Class Diagram: + getRecommendWithSimilarIngredient(ingredient)
-   
-    """
     if rules_mem is None: 
         return jsonify({"error": "Model not initialized"}), 500
     
+    if rules_mem.empty:
+        return jsonify([])
+    
     ingredient_param = request.args.get('ingredient', '').lower()
     
-    filtered = rules_mem[rules_mem['lift'] > 1.2]
+    filtered = rules_mem[(rules_mem['lift'] >= AI_MIN_LIFT) & (rules_mem['confidence'] >= AI_MIN_CONFIDENCE)]
+    
     if ingredient_param:
         query = [i.strip() for i in ingredient_param.split(',') if i.strip()]
         filtered = filtered[filtered['antecedents'].apply(
@@ -64,10 +67,6 @@ def getRecommendWithSimilarIngredient():
 
 @app.route('/skin-type-recommend', methods=['GET'])
 def getRecommendSuitForSkinType():
-    """
-    Method as defined in Class Diagram: + getRecommendSuitForSkinType(skinType)
-   
-    """
     if cluster_mem is None: 
         return jsonify({"error": "Model not initialized"}), 500
     
@@ -87,18 +86,11 @@ def getRecommendSuitForSkinType():
 
 @app.route('/retrain', methods=['POST'])
 def triggerRetraining():
-    """
-    Maps to ReTrainService.triggerRetraining() as per Diagram relationships.
-   
-    """
     try:
-        # Instantiate the retraining service
         retrain_service = ReTrainService(DIRECTUS_URL, TOKEN, CSV_ID)
         
-        # Execute the retraining logic
         df_final, cluster_p, assoc_r = retrain_service.triggerRetraining()
         
-        # Helper to sync results back to Directus Assets
         def patch_asset(fid, filename, content, content_type):
             if not fid: return
             buffer = BytesIO()
@@ -118,7 +110,6 @@ def triggerRetraining():
         patch_asset(CLUSTER_ID, 'cluster_profile.pkl', cluster_p, 'application/octet-stream')
         patch_asset(ASSOC_ID, 'association_model.pkl', assoc_r, 'application/octet-stream')
         
-        # Refresh RAM models
         load_resources()
         
         return jsonify({"status": "success", "message": "Models retrained and synchronized"})
