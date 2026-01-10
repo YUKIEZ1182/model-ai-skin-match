@@ -1,0 +1,18 @@
+[project]
+name = "model-ai-skin-match"
+version = "1.0.0"
+description = "AI Service for Cosmetic Ingredient Association and Skin Type Clustering"
+dependencies = [
+    "pandas",
+    "mlxtend",
+    "flask",
+    "scikit-learn",
+    "matplotlib",
+    "numpy",
+    "requests",
+    "python-dotenv",
+    "gunicorn"
+]
+
+[tool.setuptools]
+packages = ["."]
