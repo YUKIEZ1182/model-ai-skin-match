@@ -5,7 +5,6 @@ import os
 import requests
 from io import BytesIO
 from dotenv import load_dotenv
-
 from ReTrainService import ReTrainService
 
 load_dotenv()
@@ -27,15 +26,21 @@ def load_resources():
     """Load models from Directus Assets into RAM for prediction"""
     global cluster_mem, rules_mem
     try:
+        print("Synchronizing models from Directus...")
         if CLUSTER_ID:
             res = requests.get(f"{DIRECTUS_URL}/assets/{CLUSTER_ID}", headers=headers)
-            if res.status_code == 200: cluster_mem = pickle.loads(res.content)
+            if res.status_code == 200: 
+                cluster_mem = pickle.loads(res.content)
+                print("✅ Clustering model loaded.")
         if ASSOC_ID:
             res = requests.get(f"{DIRECTUS_URL}/assets/{ASSOC_ID}", headers=headers)
-            if res.status_code == 200: rules_mem = pickle.loads(res.content)
-        print("Models synchronized and loaded into RAM.")
+            if res.status_code == 200: 
+                rules_mem = pickle.loads(res.content)
+                print("✅ Association model loaded.")
     except Exception as e:
         print(f"⚠️ Resource Load Error: {e}")
+
+load_resources()
 
 @app.route('/rules', methods=['GET'])
 def getRecommendWithSimilarIngredient():
@@ -68,6 +73,9 @@ def getRecommendSuitForSkinType():
     
     skin_type = request.args.get('skinType', '').lower().strip()
     
+    if not skin_type:
+        return jsonify({"error": "Missing skinType parameter"}), 400
+
     for cid, data in cluster_mem.items():
         if any(skin_type in st.lower() for st in data['dominant_skin_types']):
             return jsonify({
@@ -119,5 +127,4 @@ def triggerRetraining():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    load_resources()
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=5000, debug=True)
