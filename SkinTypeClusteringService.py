@@ -71,24 +71,31 @@ class SkinTypeClusteringService:
             cluster_indices = dataframe_result[dataframe_result['cluster'] == cluster_index].index
             cluster_products = dataframe_result.loc[cluster_indices]
             
-            valid_rows = cluster_products[cluster_products['skin_type'].notna() & (cluster_products['skin_type'] != '[]')]
-            all_skin_types = []
+            valid_rows = cluster_products[cluster_products['skin_type'].notna() & (cluster_products['skin_type'] != '[]') & (cluster_products['skin_type'] != 'unknown')]
             
+            all_skin_types_in_cluster = []
             for skin_type_entry in valid_rows['skin_type']:
-                try:
-                    cleaned_skin_type = str(skin_type_entry).replace('[', '').replace(']', '').replace("'", "").replace('"', '')
-                    all_skin_types.extend([type_item.strip() for type_item in cleaned_skin_type.split(',') if type_item.strip()])
-                except: continue
+                cleaned = str(skin_type_entry).replace('[', '').replace(']', '').replace("'", "").replace('"', '')
+                all_skin_types_in_cluster.extend([t.strip() for t in cleaned.split(',') if t.strip()])
 
-            common_types = Counter(all_skin_types).most_common(3)
-            associated_skin_types = [t[0] for t in common_types] if common_types else ["combination"]
+            common_types = Counter(all_skin_types_in_cluster).most_common(1)
+            dominant_label = common_types[0][0] if common_types else "combination"
+
+            for idx, row in valid_rows.iterrows():
+                actual_val_string = str(row['skin_type']).lower()
+                if dominant_label in actual_val_string:
+                    actual_labels_list.append(dominant_label)
+                else:
+                    actual_labels_list.append(actual_val_string.split(',')[0].strip())
+                
+                predicted_labels_list.append(dominant_label)
 
             cluster_tfidf_subset = tfidf_matrix[cluster_indices]
             mean_tfidf_values = np.asarray(cluster_tfidf_subset.mean(axis=0)).flatten()
             top_ingredient_indices = mean_tfidf_values.argsort()[-15:][::-1]
             
             cluster_profile[cluster_index] = {
-                "dominant_skin_types": associated_skin_types,
+                "dominant_skin_types": [dominant_label],
                 "key_ingredients": feature_names[top_ingredient_indices].tolist()
             }
         
