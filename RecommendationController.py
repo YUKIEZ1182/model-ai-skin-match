@@ -88,16 +88,15 @@ def get_recommend_by_skin_type():
 @app.route('/retrain', methods=['POST'])
 def trigger_retraining_process():
     try:
-        print("[SERVER] Retraining process triggered...")
-        dataset_file_id = os.getenv("DATASET_FILE_ID")
-        retraining_service = ReTrainService(DIRECTUS_URL, TOKEN, dataset_file_id)
+        print("[SERVER] Retraining process triggered...")  
+        retraining_service = ReTrainService(DIRECTUS_URL, TOKEN) 
         retraining_service.triggerRetraining()
         
         load_resources()
         return jsonify({
             "status": "success", 
             "message": "Retraining completed and resources updated."
-        })
+        }), 200
     except Exception as error:
         print(f"[SERVER] Retraining process failed: {error}")
         return jsonify({"error": str(error)}), 500
