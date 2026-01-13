@@ -102,5 +102,20 @@ def trigger_retraining_process():
         print(f"[SERVER] Retraining process failed: {error}")
         return jsonify({"error": str(error)}), 500
 
+@app.route('/reload', methods=['GET'])
+def reload_models():
+    try:
+        # เรียกฟังก์ชันเดิมที่เราใช้ตอน start server
+        load_resources() 
+        return jsonify({
+            "status": "success", 
+            "message": "AI Models have been reloaded into RAM successfully"
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "status": "error", 
+            "message": str(e)
+        }), 500
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
