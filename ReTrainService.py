@@ -61,6 +61,8 @@ class ReTrainService:
             if base_dataframe.empty:
                 base_dataframe = pd.read_csv('cosmetics_final.csv')
             
+            if 'Label' in base_dataframe.columns:
+                base_dataframe = base_dataframe.rename(columns={'Label': 'skin_type'})
             if 'product_name' in base_dataframe.columns:
                 base_dataframe = base_dataframe.rename(columns={'product_name': 'name'})
 
@@ -91,6 +93,18 @@ class ReTrainService:
             total_products_dataframe = pd.concat([base_dataframe, new_products_dataframe], ignore_index=True)
             total_products_dataframe['unique_key'] = total_products_dataframe['id'].fillna(total_products_dataframe['name'])
             total_products_dataframe = total_products_dataframe.drop_duplicates(subset=['unique_key'], keep='last').drop(columns=['unique_key'])
+
+            def clean_label(val):
+                if pd.isna(val): return 'unknown'
+                s = str(val).lower().strip()
+                for char in "[]'\"":
+                    s = s.replace(char, "")
+                if not s or s in ['nan', 'none', 'null']: return 'unknown'
+                primary = s.split(',')[0].strip()
+                valid_types = ['oily', 'dry', 'combination', 'sensitive']
+                return primary if primary in valid_types else 'unknown'
+            
+            total_products_dataframe['skin_type'] = total_products_dataframe['skin_type'].apply(clean_label)
             total_products_dataframe['clean_ingredients'] = total_products_dataframe['ingredients'].apply(self._cleanIngredients)
             total_products_dataframe = total_products_dataframe[total_products_dataframe['clean_ingredients'] != ""].reset_index(drop=True)
 
@@ -133,13 +147,13 @@ class ReTrainService:
 
             training_log_payload = {
                 "date_trained": current_training_time,
-                "silhouette_score": silhouette_score,
-                "sum_of_squared_errors": sum_of_squared_errors,
-                "accuracy": accuracy_score,
-                "f1_score": f1_score,
-                "support": support_value,
-                "confidence": confidence_value,
-                "lift": lift_value,
+                "silhouette_score": float(silhouette_score),
+                "sum_of_squared_errors": float(sum_of_squared_errors),
+                "accuracy": float(accuracy_score),
+                "f1_score": float(f1_score),
+                "support": float(support_value),
+                "confidence": float(confidence_value),
+                "lift": float(lift_value),
                 "cluster_visualization": clustering_visualization_id,
                 "association_visualization": association_visualization_id,
                 "dataset_file": dataset_file_id,
@@ -155,7 +169,7 @@ class ReTrainService:
             
             requests.post(f"{self.directus_url}/items/model_training_log", headers=self.headers, json=training_log_payload)
             
-            print(f"[RETRAIN] Completed. Silhouette: {silhouette_score:.4f}, SSE: {sum_of_squared_errors:.2f}")
+            print(f"[RETRAIN] Completed. Accuracy: {float(accuracy_score):.4f}, F1: {float(f1_score):.4f}")
             return labeled_dataframe, cluster_profile, association_rules
 
         except Exception as error:
