@@ -1,6 +1,6 @@
 [project]
 name = "model-ai-skin-match"
-version = "1.0.1"
+version = "1.2.0"
 description = "AI Service for Cosmetic Ingredient Association and Skin Type Clustering"
 
 dependencies = [
