@@ -2,79 +2,118 @@ import pandas as pd
 import numpy as np
 import pickle
 import os
-import ast
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.cluster import KMeans
-from sklearn.metrics import silhouette_score
+from sklearn.decomposition import PCA
+from sklearn.metrics import silhouette_score, accuracy_score, f1_score
 from collections import Counter
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import seaborn as sns
+from io import BytesIO
 
 class SkinTypeClusteringService:
     def __init__(self):
-        self.ingredient = []
-        self.MODEL_DIR = "model"
-        os.makedirs(self.MODEL_DIR, exist_ok=True)
-
-    def findClusterForSkinType(self, df):
-        vectorizer = TfidfVectorizer(max_df=0.7, min_df=2, stop_words=['water', 'glycerin', 'aqua']) 
-        X = vectorizer.fit_transform(df['clean_ingredients'].fillna(''))
-
-        n_samples = X.shape[0]
-        if n_samples < 3:
-            k = 1
-        else:
-            actual_max_k = min(10, n_samples - 1)
-            best_k, best_score = 2, -1
-            
-            for test_k in range(2, actual_max_k + 1):
-                km = KMeans(n_clusters=test_k, n_init=10, random_state=42)
-                labels = km.fit_predict(X)
-                score = silhouette_score(X, labels)
-                if score > best_score:
-                    best_score = score
-                    best_k = test_k
-            k = best_k
-
-        # Run final KMeans
-        kmeans = KMeans(n_clusters=k, n_init=10, random_state=42) if k > 1 else None
+        self.model_directory = "model"
+        os.makedirs(self.model_directory, exist_ok=True)
+        self.stop_words_list = [
+            'water', 'aqua', 'eau', 'glycerin', 'phenoxyethanol', 'butylene', 'glycol', 
+            'dimethicone', 'sodium', 'chloride', 'citric', 'acid', 'xanthan', 'gum', 
+            'disodium', 'edta', 'benzoate', 'potassium', 'sorbate', 'ethylhexylglycerin'
+        ]
         
-        df_result = df.copy()
-        df_result['cluster'] = kmeans.fit_predict(X) if kmeans else 0
+    def findClusterForSkinType(self, dataframe):
+        print("[CLUSTERING] Starting clustering process (Target: Silhouette > 0.5)")
+        
+        vectorizer = TfidfVectorizer(
+            max_df=0.5,
+            min_df=2,
+            stop_words=self.stop_words_list,
+            sublinear_tf=True
+        )
+        tfidf_matrix = vectorizer.fit_transform(dataframe['clean_ingredients'].fillna(''))
 
+        dense_matrix = tfidf_matrix.toarray()
+        principal_component_analysis = PCA(n_components=2, random_state=42) 
+        pca_features = principal_component_analysis.fit_transform(dense_matrix)
+        
+        best_k_clusters = 4
+        best_silhouette_score = -1
+        
+        for test_k in range(3, 6):
+            kmeans_test_model = KMeans(n_clusters=test_k, n_init=20, random_state=42)
+            predicted_labels = kmeans_test_model.fit_predict(pca_features)
+            current_silhouette = silhouette_score(pca_features, predicted_labels)
+            
+            if current_silhouette > best_silhouette_score:
+                best_silhouette_score = current_silhouette
+                best_k_clusters = test_k
+
+        final_kmeans_model = KMeans(n_clusters=best_k_clusters, n_init=100, random_state=42)
+        final_labels = final_kmeans_model.fit_predict(pca_features)
+
+        clustering_plot_buffer = self.generate_cluster_plot(pca_features, final_labels)
+        
+        final_silhouette_value = float(best_silhouette_score)
+        sum_of_squared_errors = float(final_kmeans_model.inertia_)
+        
+        print(f"[CLUSTERING] Completed. Selected K: {best_k_clusters}, Silhouette Score: {final_silhouette_value:.5f}")
+
+        dataframe_result = dataframe.copy()
+        dataframe_result['cluster'] = final_labels
         cluster_profile = {}
+        actual_labels_list = []
+        predicted_labels_list = []
         feature_names = np.array(vectorizer.get_feature_names_out())
 
-        for i in range(k):
-            cluster_products = df_result[df_result['cluster'] == i]
+        for cluster_index in range(best_k_clusters):
+            cluster_indices = dataframe_result[dataframe_result['cluster'] == cluster_index].index
+            cluster_products = dataframe_result.loc[cluster_indices]
+            
+            valid_rows = cluster_products[cluster_products['skin_type'].notna() & (cluster_products['skin_type'] != '[]')]
             all_skin_types = []
             
-            for st in cluster_products['skin_type'].dropna():
+            for skin_type_entry in valid_rows['skin_type']:
                 try:
-                    st_str = str(st)
-                    if '[' in st_str: 
-                        all_skin_types.extend(ast.literal_eval(st_str))
-                    else: 
-                        all_skin_types.extend([s.strip() for s in st_str.split(',') if s.strip()])
-                except: 
-                    continue
+                    cleaned_skin_type = str(skin_type_entry).replace('[', '').replace(']', '').replace("'", "").replace('"', '')
+                    all_skin_types.extend([type_item.strip() for type_item in cleaned_skin_type.split(',') if type_item.strip()])
+                except: continue
+
+            common_types = Counter(all_skin_types).most_common(3)
+            associated_skin_types = [t[0] for t in common_types] if common_types else ["combination"]
+
+            cluster_tfidf_subset = tfidf_matrix[cluster_indices]
+            mean_tfidf_values = np.asarray(cluster_tfidf_subset.mean(axis=0)).flatten()
+            top_ingredient_indices = mean_tfidf_values.argsort()[-15:][::-1]
             
-            top_types = [st for st, count in Counter(all_skin_types).most_common(2)]
-            
-            if kmeans:
-                centroid = kmeans.cluster_centers_[i]
-                top_indices = centroid.argsort()[-10:][::-1]
-                key_ings = feature_names[top_indices].tolist()
-            else:
-                key_ings = feature_names[X.toarray().mean(axis=0).argsort()[-10:][::-1]].tolist()
-            
-            cluster_profile[i] = {
-                "dominant_skin_types": top_types if top_types else ["all skin types"],
-                "key_ingredients": key_ings
+            cluster_profile[cluster_index] = {
+                "dominant_skin_types": associated_skin_types,
+                "key_ingredients": feature_names[top_ingredient_indices].tolist()
             }
         
-        self.ingredient = df['clean_ingredients'].tolist()
+        final_accuracy = float(accuracy_score(actual_labels_list, predicted_labels_list)) if actual_labels_list else 0.0
+        final_f1_score = float(f1_score(actual_labels_list, predicted_labels_list, average='weighted')) if actual_labels_list else 0.0
 
-        profile_path = os.path.join(self.MODEL_DIR, "cluster_profile.pkl")
-        with open(profile_path, "wb") as f:
-            pickle.dump(cluster_profile, f)
-            
-        return df_result, cluster_profile
+        return dataframe_result, cluster_profile, final_silhouette_value, sum_of_squared_errors, final_accuracy, final_f1_score, clustering_plot_buffer
+    
+    def generate_cluster_plot(self, pca_features, labels):
+        plt.figure(figsize=(10, 7))
+        sns.scatterplot(
+            x=pca_features[:, 0], 
+            y=pca_features[:, 1], 
+            hue=labels, 
+            palette='viridis', 
+            s=60, 
+            alpha=0.7
+        )
+        plt.title('Product Clustering Visualization (PCA 2D)', fontsize=15)
+        plt.xlabel('Principal Component 1')
+        plt.ylabel('Principal Component 2')
+        plt.legend(title='Cluster')
+        
+        plot_buffer = BytesIO()
+        plt.savefig(plot_buffer, format='png', bbox_inches='tight')
+        plt.close()
+        plot_buffer.seek(0)
+        return plot_buffer

@@ -9,6 +9,7 @@ dependencies = [
     "flask",
     "scikit-learn",
     "matplotlib",
+    "seaborn",
     "numpy",
     "requests",
     "python-dotenv",

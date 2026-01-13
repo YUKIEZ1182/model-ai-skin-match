@@ -1,123 +1,163 @@
 import pandas as pd
+import numpy as np
 import requests
-import os
+import pickle
+import io
 import re
-from io import StringIO
+from datetime import datetime, timedelta, timezone 
+from io import BytesIO
 from IngredientAssociationService import IngredientAssociationService
 from SkinTypeClusteringService import SkinTypeClusteringService
 
 class ReTrainService:
-    def __init__(self, directus_url, token, csv_id):
+    def __init__(self, directus_url, token, csv_id=None):
         self.directus_url = directus_url
         self.headers = {"Authorization": f"Bearer {token}"}
-        self.csv_id = csv_id
-        self.assoc_service = IngredientAssociationService()
-        self.cluster_service = SkinTypeClusteringService()
+        self.association_service = IngredientAssociationService()
+        self.clustering_service = SkinTypeClusteringService()
         
-        self.IGNORE_LIST = {
-            'water', 'aqua', 'eau', 'purified water', 'distilled water',
-            'aloe barbadensis leaf water', 'camellia sinensis leaf water', 'rose water',
-            'glycerin', 'butylene glycol', 'propylene glycol', 'dipropylene glycol', 
-            'propanediol', 'pentylene glycol', 'caprylyl glycol', 'hexylene glycol',
-            '1,2-hexanediol', 'peg/ppg-17/6 copolymer', 'glycereth-26', 'sorbitol',
-            'alcohol', 'alcohol denat', 'sd alcohol', 'ethanol', 'isopropyl alcohol',
-            'fragrance', 'parfum', 'flavor', 'aroma', 
-            'limonene', 'linalool', 'geraniol', 'citronellol', 'citral', 'eugenol', 'coumarin',
-            'phenoxyethanol', 'ethylhexylglycerin', 'sodium benzoate', 'potassium sorbate',
-            'disodium edta', 'tetrasodium edta', 'trisodium edta', 'sodium citrate',
-            'citric acid', 'sodium hydroxide', 'potassium hydroxide', 'triethanolamine',
-            'chlorphenesin', 'bht', 'tocopherol', 'tocopheryl acetate', 'methylparaben', 'propylparaben',
-            'carbomer', 'xanthan gum', 'acrylates/c10-30 alkyl acrylate crosspolymer',
-            'dimethicone', 'cyclopentasiloxane', 'cyclohexasiloxane', 'dimethiconol',
-            'stearic acid', 'palmitic acid', 'myristic acid', 'lauric acid',
-            'cetyl alcohol', 'cetearyl alcohol', 'stearyl alcohol', 'behenyl alcohol',
-            'glyceryl stearate', 'peg-100 stearate', 'polysorbate 20', 'polysorbate 60', 'polysorbate 80',
-            'hydrogenated lecithin', 'polyacrylate crosspolymer-6', 'ammonium acryloyldimethyltaurate/vp copolymer',
-            'titanium dioxide', 'mica', 'tin oxide', 'iron oxides'
+        self.ingredients_ignore_list = {
+            'water', 'aqua', 'eau', 'glycerin', 'phenoxyethanol', 'butylene glycol',
+            'ethylhexylglycerin', 'sodium hyaluronate', 'disodium edta', 'tocopherol'
         }
 
-    def _cleanIngredients(self, ingredient_str):
-        """
-        Internal private method to process and clean ingredient strings.
-        This hides the cleaning logic inside ReTrainService as part of the data preparation flow.
-        """
-        if pd.isna(ingredient_str): 
+    def _cleanIngredients(self, ingredients_string):
+        if pd.isna(ingredients_string) or str(ingredients_string).strip() == "":
             return ""
         
-        # Standardize delimiters
-        processed_str = ingredient_str.replace("/", ",").replace(";", ",").replace(" and ", ",")
-        tokens = processed_str.split(",")
-        cleaned_tokens = []
-        
-        for token in tokens:
-            #Basic Cleaning
-            t = token.strip().lstrip("-*").replace("®", "").replace("™", "").replace("*", "")
-            
-            #Handle [Active Ingredient] prefixes
-            if ":" in t:
-                parts = t.split(":", 1)
-                lower_t = t.lower()
-                t = parts[1].strip() if lower_t.startswith("active") or lower_t.startswith("ingredient") else parts[0].strip()
-            
-            #Remove content inside brackets/parentheses and percentages
-            t = re.sub(r'[\(\[].*?[\)\]]', '', t)
-            t = re.sub(r'\d+(?:\.\d+)?\s*%', '', t)
-            t = t.strip()
-            
-            #Final Validation check
-            if len(t) >= 2 and re.search(r'[a-zA-Z]', t):
-                lower_t = t.lower()
-                
-                if lower_t not in self.IGNORE_LIST and not re.match(r'^ci\s?\d{5}$', lower_t):
-                    cleaned_tokens.append(lower_t)
-        
-        # Deduplicate while preserving order
-        return ", ".join(list(dict.fromkeys(cleaned_tokens)))
+        processed_string = str(ingredients_string).replace("/", ",").replace(";", ",").replace(" and ", ",")
+        tokens = processed_string.split(",")
+        cleaned_ingredients_list = [
+            token.strip().lower() for token in tokens 
+            if len(token.strip()) > 2 and token.strip().lower() not in self.ingredients_ignore_list
+        ]
+        return ", ".join(list(dict.fromkeys(cleaned_ingredients_list)))
 
     def triggerRetraining(self):
         try:
-            print("\n" + "="*40)
-            print("[RETRAIN START] System Syncing...")
+            print("\n" + "="*50)
+            print("[RETRAIN] Starting model training pipeline")
             
-            db_url = f"{self.directus_url}/items/product?fields=id,name,ingredients.ingredient_id.name,suitable_skin_type&limit=-1"
-            db_res = requests.get(db_url, headers=self.headers)
-            db_data = db_res.json().get('data', [])
-            print(f"Step 1/5: Downloaded {len(db_data)} products from DB.")
-
-            os.makedirs("data", exist_ok=True)
-            csv_path = "data/cosmetics_cleaned_final.csv"
-            if self.csv_id:
-                asset_res = requests.get(f"{self.directus_url}/assets/{self.csv_id}", headers=self.headers)
-                df = pd.read_csv(StringIO(asset_res.text)) if asset_res.status_code == 200 else pd.DataFrame()
-            else:
-                df = pd.read_csv(csv_path) if os.path.exists(csv_path) else pd.DataFrame()
-
-            print("Step 2/5: Processing and cleaning data...")
-            for item in db_data:
-                d_id = item.get('id')
-                name = item.get('name', '').strip()
-                ing_raw = ", ".join([i['ingredient_id']['name'] for i in item.get('ingredients', []) if i.get('ingredient_id')])
+            now_utc = datetime.now(timezone.utc)
+            timestamp = now_utc.strftime("%Y%m%d_%H%M%S")
+            current_training_time = now_utc.isoformat().replace("+00:00", "Z")
+            
+            base_dataframe = pd.DataFrame()
+            last_training_time = None
+            
+            log_query = "/items/model_training_log?sort=-date_trained&filter[is_active][_eq]=true&limit=1"
+            log_response = requests.get(f"{self.directus_url}{log_query}", headers=self.headers).json()
+            
+            if log_response.get('data') and len(log_response['data']) > 0:
+                latest_log = log_response['data'][0]
+                last_training_time = latest_log.get('date_trained')
+                csv_file_id = latest_log.get('dataset_file')
                 
-                clean_ing = self._cleanIngredients(ing_raw)
-                skin_types = item.get('suitable_skin_type', [])
-                
-                mask = df['directus_id'] == d_id if 'directus_id' in df.columns else pd.Series([False]*len(df))
-                if mask.any():
-                    df.loc[mask, ['product_name', 'ingredients', 'clean_ingredients', 'skin_type']] = [name, ing_raw, clean_ing, str(skin_types)]
-                else:
-                    new_row = {"directus_id": d_id, "product_name": name, "ingredients": ing_raw, "clean_ingredients": clean_ing, "skin_type": str(skin_types)}
-                    df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-            
-            df.to_csv(csv_path, index=False)
+                if csv_file_id:
+                    csv_response = requests.get(f"{self.directus_url}/assets/{csv_file_id}", headers=self.headers)
+                    if csv_response.status_code == 200:
+                        base_dataframe = pd.read_csv(BytesIO(csv_response.content))
 
-            print("Step 3/5: Running SkinTypeClusteringService...")
-            df_labeled, cluster_p = self.cluster_service.findClusterForSkinType(df)
+            if base_dataframe.empty:
+                base_dataframe = pd.read_csv('cosmetics_final.csv')
             
-            print("Step 4/5: Running IngredientAssociationService...")
-            assoc_r = self.assoc_service.findRelatedIngredient(df_labeled)
+            if 'product_name' in base_dataframe.columns:
+                base_dataframe = base_dataframe.rename(columns={'product_name': 'name'})
 
-            print("Step 5/5: Retraining completed successfully.")
-            return df_labeled, cluster_p, assoc_r
-        except Exception as e:
-            print(f"❌ [RETRAIN ERROR] Pipeline failed: {e}")
-            raise e
+            database_url = f"{self.directus_url}/items/product?fields=id,name,suitable_skin_type,ingredients.ingredient_id.name,date_created,date_updated&limit=-1"
+            
+            if last_training_time:
+                last_date_time = datetime.fromisoformat(last_training_time.replace('Z', '+00:00'))
+                buffer_string = (last_date_time - timedelta(days=1)).isoformat().split('+')[0]
+                database_url += f"&filter[_or][0][date_created][_gt]={buffer_string}&filter[_or][1][date_updated][_gt]={buffer_string}"
+
+            new_products_data = requests.get(database_url, headers=self.headers).json().get('data', [])
+            new_items_list = []
+            for item in new_products_data:
+                ingredients_list = [
+                    ingredient['ingredient_id']['name'] 
+                    for ingredient in item.get('ingredients', []) 
+                    if ingredient.get('ingredient_id')
+                ]
+                if ingredients_list:
+                    new_items_list.append({
+                        "id": str(item['id']), 
+                        "name": item['name'], 
+                        "skin_type": str(item.get('suitable_skin_type', [])), 
+                        "ingredients": ", ".join(ingredients_list)
+                    })
+            
+            new_products_dataframe = pd.DataFrame(new_items_list)
+            total_products_dataframe = pd.concat([base_dataframe, new_products_dataframe], ignore_index=True)
+            total_products_dataframe['unique_key'] = total_products_dataframe['id'].fillna(total_products_dataframe['name'])
+            total_products_dataframe = total_products_dataframe.drop_duplicates(subset=['unique_key'], keep='last').drop(columns=['unique_key'])
+            total_products_dataframe['clean_ingredients'] = total_products_dataframe['ingredients'].apply(self._cleanIngredients)
+            total_products_dataframe = total_products_dataframe[total_products_dataframe['clean_ingredients'] != ""].reset_index(drop=True)
+
+            (
+                labeled_dataframe, 
+                cluster_profile, 
+                silhouette_score, 
+                sum_of_squared_errors, 
+                accuracy_score, 
+                f1_score, 
+                clustering_plot_buffer
+            ) = self.clustering_service.findClusterForSkinType(total_products_dataframe)
+            
+            (
+                association_rules, 
+                support_value, 
+                confidence_value, 
+                lift_value
+            ) = self.association_service.findRelatedIngredient(labeled_dataframe)
+            
+            association_plot_buffer = self.association_service.generate_plot(association_rules)
+
+            def upload_file_to_directus(name, content, mime_type):
+                upload_response = requests.post(
+                    f"{self.directus_url}/files", 
+                    headers=self.headers, 
+                    files={'data': (name, content, mime_type)}
+                )
+                return upload_response.json()['data']['id']
+
+            association_rules_csv_content = association_rules.to_csv(index=False).encode('utf-8')
+            dataset_csv_content = labeled_dataframe.to_csv(index=False).encode('utf-8')
+
+            association_model_id = upload_file_to_directus(f"association_model_{timestamp}.pkl", pickle.dumps(association_rules), "application/octet-stream")
+            clustering_model_id = upload_file_to_directus(f"clustering_model_{timestamp}.pkl", pickle.dumps(cluster_profile), "application/octet-stream")
+            association_rules_csv_id = upload_file_to_directus(f"association_rules_{timestamp}.csv", association_rules_csv_content, "text/csv")
+            dataset_file_id = upload_file_to_directus(f"dataset_file_{timestamp}.csv", dataset_csv_content, "text/csv")
+            clustering_visualization_id = upload_file_to_directus(f"clustering_visualization_{timestamp}.png", clustering_plot_buffer, "image/png")
+            association_visualization_id = upload_file_to_directus(f"association_visualization_{timestamp}.png", association_plot_buffer, "image/png")
+
+            training_log_payload = {
+                "date_trained": current_training_time,
+                "silhouette_score": silhouette_score,
+                "sum_of_squared_errors": sum_of_squared_errors,
+                "accuracy": accuracy_score,
+                "f1_score": f1_score,
+                "support": support_value,
+                "confidence": confidence_value,
+                "lift": lift_value,
+                "cluster_visualization": clustering_visualization_id,
+                "association_visualization": association_visualization_id,
+                "dataset_file": dataset_file_id,
+                "association_rules_csv": association_rules_csv_id,
+                "association_model_file": association_model_id,
+                "clustering_model_file": clustering_model_id,
+                "is_active": True
+            }
+
+            active_logs_response = requests.get(f"{self.directus_url}/items/model_training_log?filter[is_active][_eq]=true", headers=self.headers).json().get('data', [])
+            for log in active_logs_response:
+                requests.patch(f"{self.directus_url}/items/model_training_log/{log['id']}", headers=self.headers, json={"is_active": False})
+            
+            requests.post(f"{self.directus_url}/items/model_training_log", headers=self.headers, json=training_log_payload)
+            
+            print(f"[RETRAIN] Completed. Silhouette: {silhouette_score:.4f}, SSE: {sum_of_squared_errors:.2f}")
+            return labeled_dataframe, cluster_profile, association_rules
+
+        except Exception as error:
+            print(f"[RETRAIN] Error encountered: {error}")
+            raise error
