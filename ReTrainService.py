@@ -113,16 +113,15 @@ class ReTrainService:
                 cluster_profile, 
                 silhouette_score, 
                 sum_of_squared_errors, 
-                accuracy_score, 
-                f1_score, 
                 clustering_plot_buffer
             ) = self.clustering_service.findClusterForSkinType(total_products_dataframe)
             
             (
                 association_rules, 
-                support_value, 
-                confidence_value, 
-                lift_value
+                avg_support, 
+                avg_confidence, 
+                avg_lift, 
+                association_plot_buffer
             ) = self.association_service.findRelatedIngredient(labeled_dataframe)
             
             association_plot_buffer = self.association_service.generate_plot(association_rules)
@@ -147,13 +146,15 @@ class ReTrainService:
 
             training_log_payload = {
                 "date_trained": current_training_time,
-                "silhouette_score": float(silhouette_score),
-                "sum_of_squared_errors": float(sum_of_squared_errors),
-                "accuracy": float(accuracy_score),
-                "f1_score": float(f1_score),
-                "support": float(support_value),
-                "confidence": float(confidence_value),
-                "lift": float(lift_value),
+                "silhouette_score": round(float(silhouette_score), 4),
+                "sum_of_squared_errors": round(float(sum_of_squared_errors), 2),
+                "avg_support": round(float(avg_support), 4),
+                "avg_confidence": round(float(avg_confidence), 4),
+                "avg_lift": round(float(avg_lift), 4),
+                "total_rules": int(len(association_rules)),
+                "min_support_threshold": self.association_service.support_threshold,
+                "min_confidence_threshold": self.association_service.confidence_threshold,
+                "min_lift_threshold": self.association_service.lift_threshold,
                 "cluster_visualization": clustering_visualization_id,
                 "association_visualization": association_visualization_id,
                 "dataset_file": dataset_file_id,
@@ -168,8 +169,7 @@ class ReTrainService:
                 requests.patch(f"{self.directus_url}/items/model_training_log/{log['id']}", headers=self.headers, json={"is_active": False})
             
             requests.post(f"{self.directus_url}/items/model_training_log", headers=self.headers, json=training_log_payload)
-            
-            print(f"[RETRAIN] Completed. Accuracy: {float(accuracy_score):.4f}, F1: {float(f1_score):.4f}")
+
             return labeled_dataframe, cluster_profile, association_rules
 
         except Exception as error:
