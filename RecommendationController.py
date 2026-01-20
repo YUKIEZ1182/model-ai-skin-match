@@ -3,6 +3,7 @@ import pandas as pd
 import pickle
 import os
 import requests
+from datetime import datetime
 from dotenv import load_dotenv
 from ReTrainService import ReTrainService
 
@@ -16,6 +17,7 @@ HEADERS = {"Authorization": f"Bearer {TOKEN}"}
 AI_LIFT_THRESHOLD = float(os.getenv("AI_LIFT", "1.0"))
 AI_CONFIDENCE_THRESHOLD = float(os.getenv("AI_CONFIDENCE", "0.5"))
 
+# Global variables for models in RAM
 clustering_model_memory = None
 association_rules_memory = None
 
@@ -35,18 +37,21 @@ def load_resources():
         clustering_file_id = latest_log['clustering_model_file']
         association_file_id = latest_log['association_model_file']
 
+        # Loading Clustering Model
         clustering_response = requests.get(f"{DIRECTUS_URL}/assets/{clustering_file_id}", headers=HEADERS)
         clustering_model_memory = pickle.loads(clustering_response.content)
         
+        # Loading Association Rules
         association_response = requests.get(f"{DIRECTUS_URL}/assets/{association_file_id}", headers=HEADERS)
         association_rules_memory = pickle.loads(association_response.content)
         
-        print(f"[SERVER] Resources loaded successfully (Log ID: {latest_log['id']})")
+        print(f"[SERVER] Resources loaded successfully. Log ID: {latest_log['id']}")
     except Exception as error:
         print(f"[SERVER] Error loading resources: {error}")
 
 load_resources()
 
+# --- 1. Related Ingredients Recommendation (With Match Strength) ---
 @app.route('/related-ingredients-recommend', methods=['GET'])
 def get_recommend_by_ingredient():
     if association_rules_memory is None: 
@@ -57,7 +62,7 @@ def get_recommend_by_ingredient():
     filtered_rules = association_rules_memory[
         (association_rules_memory['lift'] >= AI_LIFT_THRESHOLD) & 
         (association_rules_memory['confidence'] >= AI_CONFIDENCE_THRESHOLD)
-    ]
+    ].copy()
     
     if ingredient_parameter:
         query_list = [item.strip() for item in ingredient_parameter.split(',') if item.strip()]
@@ -65,8 +70,15 @@ def get_recommend_by_ingredient():
             lambda x: any(query in [item.lower() for item in x] for query in query_list)
         )]
     
-    return jsonify(filtered_rules.head(10).to_dict(orient='records'))
+    # Calculate match_strength for the output (Normalization against Lift 5.0)
+    results = filtered_rules.head(10).to_dict(orient='records')
+    for row in results:
+        strength = min(100, round((row['lift'] / 5.0) * 100)) 
+        row['match_strength'] = f"{strength}%"
+    
+    return jsonify(results)
 
+# --- 2. Skin Type Recommendation (Smart Aggregation Logic) ---
 @app.route('/skin-type-recommend', methods=['GET'])
 def get_recommend_by_skin_type():
     if clustering_model_memory is None: 
@@ -76,15 +88,25 @@ def get_recommend_by_skin_type():
     if not skin_type:
         return jsonify({"error": "Missing skinType parameter"}), 400
 
-    for cluster_id, data in clustering_model_memory.items():
-        if any(skin_type in type_label.lower() for type_label in data['dominant_skin_types']):
-            return jsonify({
-                "skinType": skin_type, 
-                "recommendedIngredients": data['key_ingredients'][:5]
-            })
+    # Retrieve profiles containing pre-aggregated clusters from AI Service
+    profiles = clustering_model_memory.get('skin_type_profiles', {})
+    data = profiles.get(skin_type)
+
+    if data:
+        target_clusters = data['target_clusters']
+        
+        # Note: To return actual products, you would typically filter your product 
+        # database using the 'target_clusters' IDs.
+        return jsonify({
+            "skinType": skin_type, 
+            "targetClusters": target_clusters,
+            "recommendedIngredients": data['key_ingredients'][:10],
+            "message": f"Successfully fetched recommendations from {len(target_clusters)} clusters."
+        })
             
     return jsonify({"error": f"Profile for '{skin_type}' not found"}), 404
 
+# --- 3. Control System (Retrain & Reload) ---
 @app.route('/retrain', methods=['POST'])
 def trigger_retraining_process():
     try:
@@ -92,7 +114,7 @@ def trigger_retraining_process():
         retraining_service = ReTrainService(DIRECTUS_URL, TOKEN) 
         retraining_service.triggerRetraining()
         
-        load_resources()
+        load_resources() # Reload updated models into RAM
         return jsonify({
             "status": "success", 
             "message": "Retraining completed and resources updated."
@@ -104,11 +126,10 @@ def trigger_retraining_process():
 @app.route('/reload', methods=['GET'])
 def reload_models():
     try:
-        # เรียกฟังก์ชันเดิมที่เราใช้ตอน start server
         load_resources() 
         return jsonify({
             "status": "success", 
-            "message": "AI Models have been reloaded into RAM successfully"
+            "message": "AI Models have been reloaded successfully."
         }), 200
     except Exception as e:
         return jsonify({

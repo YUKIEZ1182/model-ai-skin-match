@@ -1,196 +1,167 @@
 import pandas as pd
 import numpy as np
-import pickle
 import os
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
-from sklearn.metrics import silhouette_score, accuracy_score, f1_score
-from collections import Counter, defaultdict
-import matplotlib
-matplotlib.use('Agg')
+from sklearn.metrics import silhouette_score
 import matplotlib.pyplot as plt
-import seaborn as sns
 from io import BytesIO
 
 class SkinTypeClusteringService:
     def __init__(self):
         self.model_directory = "model"
         os.makedirs(self.model_directory, exist_ok=True)
-        # Stop words list
+        
         self.stop_words_list = [
             'water', 'aqua', 'eau', 'glycerin', 'phenoxyethanol', 'butylene', 'glycol', 
             'dimethicone', 'sodium', 'chloride', 'citric', 'acid', 'xanthan', 'gum', 
             'disodium', 'edta', 'benzoate', 'potassium', 'sorbate', 'ethylhexylglycerin',
-            'fragrance', 'parfum', 'alcohol', 'denat'
+            'fragrance', 'parfum', 'alcohol', 'denat', 'methylparaben', 'propylparaben',
+            'stearate', 'palmitate', 'acetate', 'tocopherol', 'carbomer', 'cetyl', 'stearyl',
+            'peg', 'polymer', 'hydrogenated', 'extract', 'leaf', 'root', 'oil'
         ]
         
+        self.feature_weights = {
+            'centella': 30.0, 'madecassoside': 25.0, 'panthenol': 25.0,
+            'niacinamide': 20.0, 'witch hazel': 15.0, 'zinc pca': 15.0,
+            'ceramide': 12.0, 'shea': 12.0, 'salicylic': 10.0
+        }
+
+    def _prepare_labels(self, dataframe):
+        priority = ['sensitive', 'combination', 'dry', 'oily']
+        def get_primary(st):
+            if pd.isna(st): return 'unknown'
+            st = str(st).lower()
+            for p in priority:
+                if p in st: return p
+            return 'unknown'
+        df = dataframe.copy()
+        df['primary_skin_type'] = df['skin_type'].apply(get_primary)
+        return df
+
     def findClusterForSkinType(self, dataframe):
-        print("[CLUSTERING] Starting clustering process (With Coverage Guarantee)")
+        print("[AI] Initializing unsupervised clustering and identity extraction...")
+        df_processed = self._prepare_labels(dataframe)
+        ing_col = 'ingredients' if 'ingredients' in df_processed.columns else 'clean_ingredients'
         
-        # 1. Feature Extraction
-        vectorizer = TfidfVectorizer(
-            max_df=0.8,
-            min_df=2,
-            ngram_range=(1, 2),
-            stop_words=self.stop_words_list,
-            sublinear_tf=True
-        )
-        tfidf_matrix = vectorizer.fit_transform(dataframe['clean_ingredients'].fillna(''))
+        vectorizer = TfidfVectorizer(max_df=0.12, min_df=2, ngram_range=(1, 2), 
+                                     stop_words=self.stop_words_list, sublinear_tf=True)
+        tfidf_matrix = vectorizer.fit_transform(df_processed[ing_col].fillna(''))
+        tfidf_dense = tfidf_matrix.toarray()
+        feature_names = vectorizer.get_feature_names_out()
+        
+        vocab = vectorizer.vocabulary_
+        for word, weight in self.feature_weights.items():
+            if word in vocab:
+                tfidf_dense[:, vocab[word]] *= weight
 
-        dense_matrix = tfidf_matrix.toarray()
-        principal_component_analysis = PCA(n_components=2, random_state=42) 
-        pca_features = principal_component_analysis.fit_transform(dense_matrix)
+        pca = PCA(n_components=8, random_state=42)
+        pca_features = pca.fit_transform(tfidf_dense)
+
+        n_clusters = 5
+        kmeans = KMeans(n_clusters=n_clusters, init='k-means++', n_init=150, max_iter=2000, random_state=42)
+        df_processed['cluster'] = kmeans.fit_predict(pca_features)
         
-        # 2. Find Best K
-        best_k_clusters = 4
-        best_silhouette_score = -1
+        sse_score = kmeans.inertia_
         
-        for test_k in range(4, 7):
-            kmeans_test_model = KMeans(n_clusters=test_k, n_init=20, random_state=42)
-            predicted_labels = kmeans_test_model.fit_predict(pca_features)
-            current_silhouette = silhouette_score(pca_features, predicted_labels)
+        all_skins = ['sensitive', 'combination', 'dry', 'oily']
+        cluster_stats = []
+        for i in range(1, n_clusters):
+            subset = df_processed[df_processed['cluster'] == i]
+            total_in_cluster = len(subset)
+            counts = subset['primary_skin_type'].value_counts()
             
-            if current_silhouette > best_silhouette_score:
-                best_silhouette_score = current_silhouette
-                best_k_clusters = test_k
+            for st in all_skins:
+                count = counts.get(st, 0)
+                density = count / total_in_cluster if total_in_cluster > 0 else 0
+                rank = list(counts.index).index(st) + 1 if st in counts.index else 99
+                cluster_stats.append({
+                    'cluster': i, 'skin_type': st, 'count': count, 'density': density, 'rank': rank
+                })
 
-        # 3. Final Train
-        final_kmeans_model = KMeans(n_clusters=best_k_clusters, n_init=100, random_state=42)
-        final_labels = final_kmeans_model.fit_predict(pca_features)
+        stats_df = pd.DataFrame(cluster_stats)
+        skin_type_profiles = {}
 
-        clustering_plot_buffer = self.generate_cluster_plot(pca_features, final_labels)
-        
-        final_silhouette_value = float(best_silhouette_score)
-        sum_of_squared_errors = float(final_kmeans_model.inertia_)
-        
-        print(f"[CLUSTERING] Completed. Selected K: {best_k_clusters}")
-
-        dataframe_result = dataframe.copy()
-        dataframe_result['cluster'] = final_labels
-        
-        cluster_profile = {}
-        actual_labels_list = []
-        predicted_labels_list = []
-        feature_names = np.array(vectorizer.get_feature_names_out())
-
-        # ตัวแปรสำหรับเก็บสถิติเพื่อทำ Coverage Guarantee
-        cluster_skin_counts = defaultdict(Counter) # { cluster_id: Counter({'oily': 10, ...}) }
-        all_found_skin_types = set()
-
-        # 4. สร้าง Profile เบื้องต้น
-        for cluster_index in range(best_k_clusters):
-            cluster_indices = dataframe_result[dataframe_result['cluster'] == cluster_index].index
-            cluster_products = dataframe_result.loc[cluster_indices]
+        for st in all_skins:
+            st_stats = stats_df[stats_df['skin_type'] == st].copy()
+            quality_matches = st_stats[st_stats['rank'] <= 2].sort_values(by=['rank', 'density'], ascending=[True, False])
             
-            # ดึง Skin Type
-            valid_rows = cluster_products[cluster_products['skin_type'].notna() & (cluster_products['skin_type'] != '[]')]
-            
-            all_skin_types_in_cluster = []
-            for skin_type_entry in valid_rows['skin_type']:
-                cleaned = str(skin_type_entry).replace('[', '').replace(']', '').replace("'", "").replace('"', '')
-                types = [t.strip().lower() for t in cleaned.split(',') if t.strip()]
-                all_skin_types_in_cluster.extend(types)
-                all_found_skin_types.update(types)
-
-            # เก็บสถิติ
-            counts = Counter(all_skin_types_in_cluster)
-            cluster_skin_counts[cluster_index] = counts
-            total_count = sum(counts.values()) if counts else 1
-            
-            # Logic เดิม: เลือก Top 3 หรือ >15%
-            dominant_labels = []
-            sorted_types = counts.most_common()
-            
-            if sorted_types:
-                dominant_labels.append(sorted_types[0][0]) # อันดับ 1 เสมอ
-                for s_type, s_count in sorted_types[1:]:
-                    percentage = s_count / total_count
-                    if percentage > 0.15 or len(dominant_labels) < 3: 
-                        if s_type not in dominant_labels:
-                            dominant_labels.append(s_type)
+            if not quality_matches.empty:
+                final_selection = quality_matches.head(2)['cluster'].tolist()
+                mode_desc = "Primary and Secondary Association" # เปลี่ยนคำอธิบายใหม่ให้ดูหรูขึ้น
             else:
-                dominant_labels = ["combination"] 
+                best_single = st_stats.sort_values(by='density', ascending=False).head(1)
+                final_selection = best_single['cluster'].tolist()
+                mode_desc = "Core Identity Mapping"
 
-            # หา Key Ingredients
-            cluster_tfidf_subset = tfidf_matrix[cluster_indices]
-            if cluster_tfidf_subset.shape[0] > 0:
-                mean_tfidf_values = np.asarray(cluster_tfidf_subset.mean(axis=0)).flatten()
-                top_ingredient_indices = mean_tfidf_values.argsort()[-10:][::-1]
-                key_ingredients = feature_names[top_ingredient_indices].tolist()
-            else:
-                key_ingredients = []
-            
-            cluster_profile[cluster_index] = {
-                "dominant_skin_types": dominant_labels,
-                "key_ingredients": key_ingredients
+            aggregated_ings = []
+            for cid in final_selection:
+                mean_tfidf = tfidf_dense[df_processed['cluster'] == cid].mean(axis=0)
+                top_idx = mean_tfidf.argsort()[-8:][::-1]
+                aggregated_ings.extend([feature_names[idx] for idx in top_idx])
+
+            skin_type_profiles[st] = {
+                'target_clusters': final_selection,
+                'key_ingredients': list(dict.fromkeys(aggregated_ings))[:10],
+                'selection_logic': mode_desc
             }
 
-            # Accuracy Check logic (Simplified)
-            primary_label = dominant_labels[0]
-            for idx, row in valid_rows.iterrows():
-                actual_val_string = str(row['skin_type']).lower()
-                if primary_label in actual_val_string:
-                    actual_labels_list.append(primary_label)
-                else:
-                    actual_labels_list.append(actual_val_string.split(',')[0].strip())
-                predicted_labels_list.append(primary_label)
-
-        # 5. ✅ Global Coverage Guarantee (ส่วนสำคัญที่เพิ่มเข้ามา)
-        # ตรวจสอบว่า target_types ทั้งหมด ถูกระบุลงใน cluster ไหนหรือยัง
-        target_types = ['oily', 'dry', 'combination', 'sensitive']
-        
-        for target in target_types:
-            # เช็คว่า target นี้มีอยู่ใน dataset ไหม
-            if target not in all_found_skin_types:
-                continue # ถ้าไม่มีใน data เลยก็ข้าม
-
-            # เช็คว่า target นี้ไปโผล่ใน dominant_skin_types ของกลุ่มไหนบ้างหรือยัง
-            is_covered = False
-            for c_id, profile in cluster_profile.items():
-                if target in profile['dominant_skin_types']:
-                    is_covered = True
-                    break
+        cluster_analysis = {'skin_type_profiles': skin_type_profiles}
+        for i in range(n_clusters):
+            subset = df_processed[df_processed['cluster'] == i]
+            counts = subset['primary_skin_type'].value_counts()
+            p_skin = counts.index[0] if not counts.empty else "unknown"
             
-            # ถ้ายังไม่มีกลุ่มไหนรับเป็น dominant เลย -> บังคับยัดใส่กลุ่มที่มี target นี้เยอะที่สุด
-            if not is_covered:
-                print(f"[CLUSTERING] Force assigning '{target}' to best matching cluster...")
-                best_cluster_id = -1
-                max_count = -1
-                
-                for c_id, counts in cluster_skin_counts.items():
-                    if counts[target] > max_count:
-                        max_count = counts[target]
-                        best_cluster_id = c_id
-                
-                if best_cluster_id != -1:
-                    cluster_profile[best_cluster_id]['dominant_skin_types'].append(target)
-                    print(f"   -> Assigned '{target}' to Cluster {best_cluster_id}")
+            cluster_analysis[i] = {
+                'dominant_skin_types': [p_skin.lower()],
+                'primary': p_skin,
+                'key_ingredients': [feature_names[idx] for idx in tfidf_dense[df_processed['cluster'] == i].mean(axis=0).argsort()[-10:][::-1]]
+            }
 
-        final_accuracy = float(accuracy_score(actual_labels_list, predicted_labels_list)) if actual_labels_list else 0.0
-        final_f1_score = float(f1_score(actual_labels_list, predicted_labels_list, average='weighted')) if actual_labels_list else 0.0
-
-        print(f"[CLUSTERING] Stats - Accuracy: {final_accuracy:.2f}, F1: {final_f1_score:.2f}")
-
-        return dataframe_result, cluster_profile, final_silhouette_value, sum_of_squared_errors, final_accuracy, final_f1_score, clustering_plot_buffer
-    
-    def generate_cluster_plot(self, pca_features, labels):
-        plt.figure(figsize=(10, 7))
-        sns.scatterplot(
-            x=pca_features[:, 0], 
-            y=pca_features[:, 1], 
-            hue=labels, 
-            palette='tab10', 
-            s=60, 
-            alpha=0.7
-        )
-        plt.title('Product Clustering Visualization (PCA 2D)', fontsize=15)
-        plt.xlabel('Principal Component 1')
-        plt.ylabel('Principal Component 2')
-        plt.legend(title='Cluster')
+        plot_buffer = self.generate_nuanced_plot(df_processed, cluster_analysis, n_clusters)
+        sil_score = silhouette_score(pca_features, df_processed['cluster'])
         
-        plot_buffer = BytesIO()
-        plt.savefig(plot_buffer, format='png', bbox_inches='tight')
+        print(f"[AI] Clustering Completed. Silhouette: {sil_score:.3f}, SSE: {sse_score:.2f}")
+        return df_processed, cluster_analysis, sil_score, sse_score, plot_buffer
+
+    def generate_nuanced_plot(self, dataframe, analysis, n_clusters):
+        plot_data = pd.crosstab(dataframe['cluster'], dataframe['primary_skin_type'])
+        target_cols = ['combination', 'oily', 'dry', 'sensitive']
+        available_cols = [c for c in target_cols if c in plot_data.columns]
+        plot_data = plot_data[available_cols]
+
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(24, 12), gridspec_kw={'width_ratios': [1.2, 1]})
+        colors = {'combination': '#9b59b6', 'oily': '#27ae60', 'dry': '#2980b9', 'sensitive': '#f1c40f'}
+        current_colors = [colors[c] for c in available_cols]
+        
+        plot_data.plot(kind='bar', stacked=True, color=current_colors, alpha=0.8, ax=ax1, edgecolor='white')
+        
+        # 1. ระบุชื่อแกน X และ Y ให้ชัดเจน
+        ax1.set_title(f'Skin Type Cluster Distribution Analysis', fontsize=18)
+        ax1.set_xlabel('Cluster Identifier (Index)', fontsize=14)
+        ax1.set_ylabel('Total Product Frequency', fontsize=14)
+        
+        # 2. ย้ายป้าย Skin Type (Legend) ลงมาไว้ด้านล่าง
+        ax1.legend(title='Skin Type Profiles', loc='upper center', bbox_to_anchor=(0.5, -0.15), 
+                   ncol=4, fontsize=12, frameon=True)
+
+        ax2.axis('off')
+        # 3. ปรับชื่อหัวข้อ และลบวงเล็บทั้งหมดออกจากส่วนแสดงผล
+        text_content = "AI Profile Selection\n" + "="*55 + "\n\n"
+        profiles = analysis['skin_type_profiles']
+        for st, data in profiles.items():
+            text_content += f"SKIN TYPE: {st.upper()}\n"
+            text_content += f"DATA SOURCE: CLUSTERS {data['target_clusters']}\n"
+            text_content += f"STRATEGY: {data['selection_logic']}\n" # ไม่มีวงเล็บแล้ว
+            text_content += f"INGREDIENTS: {', '.join(data['key_ingredients'][:5])}\n"
+            text_content += "-"*55 + "\n"
+        
+        ax2.text(0, 0.95, text_content, transform=ax2.transAxes, fontsize=11, verticalalignment='top', family='monospace')
+
+        plt.tight_layout()
+        buf = BytesIO()
+        plt.savefig(buf, format='png', dpi=130, bbox_inches='tight')
         plt.close()
-        plot_buffer.seek(0)
-        return plot_buffer
+        buf.seek(0)
+        return buf
